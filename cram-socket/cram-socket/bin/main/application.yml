@@ -1,0 +1,26 @@
+spring:
+  application:
+    name: cram-socket
+  rabbitmq:
+    host: rabbitmq
+#    host: localhost
+    port: 5672
+    username: guest
+    password: guest
+  data:
+    redis:
+      host: redis
+#      host: localhost
+      port: 6379
+  jwt:
+    secret: eIcXG+itRwOEgz4COWx1ckHsHTB94VCYS+A5plrAXpQNuvZGxQc+/fiP7T4aYOIoxAmX9G7PMJWbjpi4MgYnfA==
+logging:
+  level:
+    com.cram.socket: TRACE
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%logger{20}] %msg%n"
+server:
+  port: 8081
+socketio:
+  host: "*"
+  port: 80

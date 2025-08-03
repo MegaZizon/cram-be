@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Socket.IO WebRTC</title>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; }
+        label { display: block; margin-top: 10px; font-weight: bold; }
+        input { margin-bottom: 10px; width: 300px; padding: 5px; }
+        video { width: 300px; height: 200px; margin: 10px; background: black; }
+    </style>
+</head>
+<body>
+<h1>Socket.IO WebRTC Room</h1>
+
+<label for="email-input">Email (예: user1@example.com)</label>
+<input id="email-input" placeholder="이메일 입력" value="user1@example.com">
+
+<label for="group-input">Group ID (숫자 입력)</label>
+<input id="group-input" placeholder="그룹 ID 입력" type="number" value="1">
+
+<label for="meeting-room-input">Meeting Room ID (숫자 입력)</label>
+<input id="meeting-room-input" placeholder="미팅룸 ID 입력" type="number" value="1">
+
+<label for="peer-id-input">Peer ID (1,2,3...)</label>
+<input id="peer-id-input" placeholder="Peer ID 입력" value="1">
+<div id="chat-ui" style="display: none; margin-top: 20px;">
+    <div id="chat-box" style="border: 1px solid #ccc; height: 300px; overflow-y: scroll; padding: 10px;"></div>
+    <input type="text" id="chat-input" placeholder="메시지를 입력하세요" />
+    <button onclick="sendTextMessage()">전송</button>
+</div>
+<button onclick="connectWithEmail()">1. 토큰 발급</button>
+<button onclick="connection()">2. 서버 연결 및 입장</button>
+<button onclick="getWebrtcJoin()">2. 화상음성채널 입장</button>
+
+<h3>로컬 비디오</h3>
+<video id="local_video" autoplay playsinline muted></video>
+<h3>원격 참가자 비디오</h3>
+<div id="remote-videos"></div>
+
+<script>
+    let socket;
+    let myToken, localUserName, groupId, meetingRoomId, email;
+    const peerConnections = new Map();
+    const participants = new Set();
+    let localStream;
+
+    async function connectWithEmail() {
+        email = document.getElementById("email-input").value.trim();
+        groupId = document.getElementById("group-input").value.trim();
+        meetingRoomId = document.getElementById("meeting-room-input").value.trim();
+        localUserName = document.getElementById("peer-id-input").value.trim();
+
+        if (!email || !groupId || !meetingRoomId || !localUserName) {
+            alert("모든 입력 필드를 작성해주세요.");
+            return;
+        }
+
+        try {
+
+
+
+            const response = await fetch(`/api/token?email=${email}&groupId=${groupId}`);
+            const data = await response.json();
+            myToken = data.token;
+            console.log("[DEBUG] 토큰 발급 성공:", myToken);
+
+            const socketTicketResponse = await fetch(`/api/v1/groups/${groupId}/meeting-rooms/create`, {
+                method: 'POST',  // GET 요청
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${myToken}`  // Authorization 헤더에 토큰 포함
+                },
+                body: JSON.stringify({
+                    name: '회의 제목'
+                })
+            });
+
+            const json = await socketTicketResponse.json();
+
+            console.log(json);
+
+            myToken = json.data.meetingRoomTicket;
+            meetingRoomId = json.data.meetingRoomId;
+
+            console.log("[DEBUG] 토큰 발급 성공:", myToken);
+        } catch (e) {
+            console.error("[ERROR] 토큰 발급 실패:", e);
+            alert("토큰 발급 중 오류 발생");
+        }
+    }
+    function getWebrtcJoin() {
+        socket.emit("join", { groupId }, async (...ack) => {
+
+            const [type, payload] = ack;
+
+            const data = ack || {};
+            console.log("[DEBUG] 받은 peerList:",payload);
+            const peerList = (payload.peerList || []).map(peer => peer.userId);
+            console.log("[DEBUG] 받은 peerList:",peerList);
+
+            for (const userId of peerList || []) {
+                if (userId !== localUserName) {
+                    console.log("[DEBUG] peerList:add", userId);
+                    participants.add(userId);
+                    await createPeerConnection(userId);
+                }
+            }
+        });
+
+        socket.emit("newPeer", { userId: localUserName });
+    }
+
+    function connection() {
+        if (!myToken) {
+            alert("먼저 토큰을 발급 받아주세요.");
+            return;
+        }
+
+
+        socket = io("ws://175.117.82.139/ws/v1/meetingRoom", {
+            path: "/socket.io",
+            query: { token: myToken, meetingRoomId: Number(meetingRoomId)},
+            transports: ["websocket"]
+        });
+
+
+        // socket = io("ws://223.130.146.25/ws/v1/meetingRoom", {
+        //     path: "/socket.io",
+        //     query: { token: myToken, meetingRoomId: Number(meetingRoomId)},
+        //     transports: ["websocket"]
+        // });
+
+        socket.on("connect", async () => {
+            console.log("[DEBUG] Socket 연결 완료");
+            document.getElementById("chat-ui").style.display = "block";
+        });
+
+        socket.on("disconnect", () => {
+            console.log("🔌 연결 종료됨");
+            document.getElementById("chat-ui").style.display = "none";
+        });
+
+        socket.on("peerList", async (data) => {
+            console.log(data);
+        });
+
+        socket.on("newPeer", async ({ userId }) => {
+            console.log("[DEBUG] 새 피어 등장:", userId);
+            if (userId !== localUserName) {
+                participants.add(userId);
+                await createPeerConnection(userId);
+                await makeOffer(userId);
+            }
+        });
+
+        socket.on("offer", async ({ userId, sdp }) => {
+            console.log("[DEBUG] offer 수신 from:", userId);
+            console.log("받은 sdp:", sdp);
+            await handleOffer(userId, sdp);
+        });
+
+        socket.onAny((event, ...args) => {
+            console.log(`[onAny] 수신 이벤트명: ${event}`);
+            console.log(`[onAny] 데이터:`, args);
+        });
+
+        socket.on("answer", async ({ userId, sdp }) => {
+            console.log("[DEBUG] answer 수신 from:", userId);
+            await handleAnswer(userId, sdp);
+        });
+
+        socket.on("iceCandidate", async ({ userId, candidate }) => {
+            console.log("[DEBUG] ICE 수신 from:", userId);
+            await handleIceCandidate(userId, candidate);
+        });
+        socket.on("message", (data) => {
+            console.log("📩 수신:", data);
+            displayMessage(data);
+        });
+    }
+
+    async function createPeerConnection(peerId) {
+        const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+        peerConnections.set(peerId, pc);
+
+        pc.onicecandidate = e => {
+            if (e.candidate) {
+                console.log("[DEBUG] ICE 후보 전송:", e.candidate);
+                socket.emit("iceCandidate", {
+                    userId: peerId,
+                    candidate: e.candidate
+                });
+            }
+        };
+
+        pc.ontrack = e => {
+            console.log("[DEBUG] track 수신 from:", peerId);
+            let video = document.getElementById(`remote-${peerId}`);
+            if (!video) {
+                video = document.createElement("video");
+                video.id = `remote-${peerId}`;
+                video.autoplay = true;
+                video.playsInline = true;
+                document.getElementById("remote-videos").appendChild(video);
+            }
+            video.srcObject = e.streams[0];
+        };
+
+        localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+    }
+
+    async function makeOffer(peerId) {
+        const pc = peerConnections.get(peerId);
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        console.log("[DEBUG] offer 전송 to:", peerId);
+        socket.emit("offer", { userId: peerId, sdp: offer });
+    }
+
+    async function handleOffer(from, sdp) {
+        const pc = peerConnections.get(from);
+        await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        console.log("[DEBUG] answer 전송 to:", from);
+        socket.emit("answer", { userId: from, sdp : answer });
+    }
+
+    async function handleAnswer(from, sdp) {
+        const pc = peerConnections.get(from);
+        await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+    }
+
+    async function handleIceCandidate(from, candidate) {
+        const pc = peerConnections.get(from);
+        if (pc && candidate) {
+            await pc.addIceCandidate(new RTCIceCandidate(candidate));
+        }
+    }
+
+    async function startLocalStream() {
+        try {
+            localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+            document.getElementById("local_video").srcObject = localStream;
+            console.log("[DEBUG] 로컬 스트림 연결 성공");
+        } catch (e) {
+            console.error("[ERROR] 로컬 스트림 연결 실패:", e);
+            alert("카메라/마이크 접근을 허용해주세요.");
+        }
+    }
+
+    function sendTextMessage() {
+        const input = document.getElementById("chat-input");
+        const message = input.value.trim();
+        if (!message || !socket || !socket.connected) return;
+
+        const tempId = Math.random().toString(36).substring(2, 8);
+
+        const payload = {
+            type: "text",
+            message: message,
+            image: null,
+            tempId: tempId
+        };
+
+        socket.emit("message", payload, (ack) => {
+            console.log("✅ 서버 응답:", ack);
+        });
+
+        input.value = "";
+    }
+
+    function displayMessage(data) {
+        const chatBox = document.getElementById("chat-box");
+
+        const msgDiv = document.createElement("div");
+        msgDiv.className = "chat-message";
+        msgDiv.style.marginBottom = "10px";
+
+        const profileHtml = `
+            <img src="${data.senderProfileUrl || ''}" style="width: 30px; height: 30px; border-radius: 50%; vertical-align: middle; margin-right: 5px;">
+            <strong>${data.senderName}</strong>
+            <small style="color: gray;">${new Date(data.createdAt).toLocaleString()}</small>
+        `;
+
+        let contentHtml = "";
+        if (data.messageType === "text") {
+            contentHtml = `<p>${data.message}</p>`;
+        } else if (data.messageType === "image") {
+            contentHtml = `<img src="${data.imageUrl}" style="max-width: 200px;">`;
+        }
+
+        msgDiv.innerHTML = `${profileHtml}<br>${contentHtml}`;
+        chatBox.appendChild(msgDiv);
+        chatBox.scrollTop = chatBox.scrollHeight;
+    }
+
+    window.onload = startLocalStream;
+</script>
+</body>
+</html>

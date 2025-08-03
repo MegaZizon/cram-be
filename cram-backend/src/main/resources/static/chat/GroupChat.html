@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>Socket.IO Chat</title>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+</head>
+<body>
+<h2>채팅 접속: 이메일로 토큰 발급 후 그룹 ID로 접속 (user1~user10@example.com)</h2>
+
+<label for="email-input">EMAIL</label>
+<input type="email" id="email-input" placeholder="이메일" value="user1@example.com"/>
+<label for="group-input">GROUP_ID</label>
+<input type="number" id="group-input" placeholder="그룹 ID" min="1" value="1"/>
+<button onclick="connectWithEmail()">접속하기</button>
+
+<div id="chat-ui" style="display: none; margin-top: 20px;">
+    <div id="chat-box" style="border: 1px solid #ccc; height: 300px; overflow-y: scroll; padding: 10px;"></div>
+    <input type="text" id="chat-input" placeholder="메시지를 입력하세요" />
+    <button onclick="sendTextMessage()">전송</button>
+</div>
+
+<script>
+    let socket = null;
+
+    async function connectWithEmail() {
+        disconnectSocket();
+        const email = document.getElementById("email-input").value.trim();
+        const groupId = document.getElementById("group-input").value.trim();
+
+        if (!email || !groupId) {
+            alert("이메일과 그룹 ID를 모두 입력해주세요.");
+            return;
+        }
+
+        try {
+            const response = await fetch(`/api/token?email=${email}&groupId=${groupId}`);
+            if (!response.ok) {
+                alert("유저를 찾을 수 없습니다.");
+                return;
+            }
+
+            const { token } = await response.json();
+
+            const socketTicketResponse = await fetch(`/api/v1/groups/${groupId}/join`, {
+                method: 'GET',  // GET 요청
+                headers: {
+                    'Authorization': `Bearer ${token}`  // Authorization 헤더에 토큰 포함
+                }
+            });
+
+            const json = await socketTicketResponse.json();
+
+            const ticket = json.data.groupChatTicket;
+
+            // Socket.IO 연결
+
+            socket = io("ws://175.117.82.139/ws/v1/groupchat", {
+                query: {
+                    token:ticket,
+                    groupId
+                },
+                transports: ["websocket"]
+            });
+
+            // socket = io("ws://223.130.146.25/ws/v1/groupchat", {
+            //     query: {
+            //         token:ticket,
+            //         groupId
+            //     },
+            //     transports: ["websocket"]
+            // });
+
+
+
+            socket.on("connect", () => {
+                console.log("✅ Socket.IO 연결됨");
+                document.getElementById("chat-ui").style.display = "block";
+                socket.emit("join", {
+                    groupId: groupId,
+                    timestamp: new Date().toISOString()
+                });
+            });
+
+            socket.on("disconnect", () => {
+                console.log("🔌 연결 종료됨");
+                document.getElementById("chat-ui").style.display = "none";
+            });
+
+            socket.on("connect_error", (err) => {
+                console.error("❌ 연결 실패:", err.message);
+            });
+
+            socket.on("message", (data) => {
+                console.log("📩 수신:", data);
+                displayMessage(data);
+            });
+
+            socket.on("updateMessageId", (data) => {
+                console.log("📩 수신:", data);
+
+            });
+
+        } catch (err) {
+            console.error("토큰 요청 실패:", err);
+            alert("오류 발생");
+        }
+    }
+
+    function sendTextMessage() {
+        const input = document.getElementById("chat-input");
+        const message = input.value.trim();
+        if (!message || !socket || !socket.connected) return;
+
+        const tempId = Math.random().toString(36).substring(2, 8);
+
+        console.log("wjsthd")
+        const payload = {
+            type: "text",
+            message: message,
+            image: null,
+            tempId: tempId
+        };
+
+        socket.emit("message", payload, (ack) => {
+            console.log("✅ 서버 응답:", ack);
+        });
+
+
+
+        input.value = "";
+    }
+
+    function displayMessage(data) {
+        const chatBox = document.getElementById("chat-box");
+
+        const msgDiv = document.createElement("div");
+        msgDiv.className = "chat-message";
+        msgDiv.style.marginBottom = "10px";
+
+        const profileHtml = `
+      <img src="${data.senderProfileUrl || ''}" style="width: 30px; height: 30px; border-radius: 50%; vertical-align: middle; margin-right: 5px;">
+      <strong>${data.senderName}</strong>
+      <small style="color: gray;">${new Date(data.createdAt).toLocaleString()}</small>
+    `;
+
+        let contentHtml = "";
+        if (data.messageType === "text") {
+            contentHtml = `<p>${data.message}</p>`;
+        } else if (data.messageType === "image") {
+            contentHtml = `<img src="${data.imageUrl}" style="max-width: 200px;">`;
+        }
+
+        msgDiv.innerHTML = `${profileHtml}<br>${contentHtml}`;
+        chatBox.appendChild(msgDiv);
+        chatBox.scrollTop = chatBox.scrollHeight;
+    }
+
+    function disconnectSocket() {
+        if (socket && socket.connected) {
+            socket.disconnect();
+            console.log("🔌 수동 연결 종료");
+            document.getElementById("chat-ui").style.display = "none";
+        }
+    }
+</script>
+</body>
+</html>
